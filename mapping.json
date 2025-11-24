@@ -1,0 +1,97 @@
+{
+    "mappings": {
+        "properties": {
+            "JobID": {
+                "type": "keyword"
+            },
+            "JobSectorID": {
+                "type": "keyword"
+            },
+            "deadline": {
+                "type": "date",
+                "format": "yyyy-MM-dd'T'HH:mm:ss'Z'"
+            },
+            "job_information": {
+                "properties": {
+                    "degree_embedding": {
+                        "type": "dense_vector",
+                        "dims": 1024,
+                        "index": true,
+                        "similarity": "cosine",
+                        "index_options": {
+                            "type": "int8_hnsw",
+                            "m": 16,
+                            "ef_construction": 100
+                        }
+                    },
+                    "experience_embedding": {
+                        "type": "dense_vector",
+                        "dims": 1024,
+                        "index": true,
+                        "similarity": "cosine",
+                        "index_options": {
+                            "type": "int8_hnsw",
+                            "m": 16,
+                            "ef_construction": 100
+                        }
+                    },
+                    "soft_skill_embedding": {
+                        "type": "dense_vector",
+                        "dims": 1024,
+                        "index": true,
+                        "similarity": "cosine",
+                        "index_options": {
+                            "type": "int8_hnsw",
+                            "m": 16,
+                            "ef_construction": 100
+                        }
+                    },
+                    "technical_skill_embedding": {
+                        "type": "dense_vector",
+                        "dims": 1024,
+                        "index": true,
+                        "similarity": "cosine",
+                        "index_options": {
+                            "type": "int8_hnsw",
+                            "m": 16,
+                            "ef_construction": 100
+                        }
+                    },
+                    "neighbors": {
+                        "properties": {
+                            "degree": {
+                                "type": "keyword"
+                            },
+                            "experience": {
+                                "type": "keyword"
+                            },
+                            "soft": {
+                                "type": "keyword"
+                            },
+                            "hard": {
+                                "type": "keyword"
+                            }
+                        }
+                    }
+                }
+            },
+            "full_content_text": {
+                "type": "text"
+            },
+            "full_content_embedding": {
+                "type": "dense_vector",
+                "dims": 1024,
+                "index": true,
+                "similarity": "cosine",
+                "index_options": {
+                    "type": "int8_hnsw",
+                    "m": 16,
+                    "ef_construction": 100
+                }
+            },
+            "keywords": {
+                "type": "text"
+            }
+        }
+    }
+}
