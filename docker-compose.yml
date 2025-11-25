@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  # --- 1. RAG CORE (PYTHON FASTAPI) ---
+  # Đây là service mới thêm vào
+  rag-core:
+    build: ./rag-core
+    container_name: rag-core
+    ports:
+      - "8000:8000"
+    networks:
+      - app-network
+
+  # --- 2. JAVA BACKEND (BE-QTDA) ---
+  rag-backend:
+    build: ./BE-QTDA
+    container_name: rag-backend
+    ports:
+      - "9999:9999"
+    environment:
+      # Java gọi sang Python qua tên service "rag-core"
+      - RAG_FASTAPI_URL=http://rag-core:8000/api/ask-snake
+    depends_on:
+      - rag-core  # Java chờ Python chạy trước
+    networks:
+      - app-network
+
+  # --- 3. FRONTEND (FE-QTDA) ---
+  frontend:
+    build: ./FE-QTDA
+    container_name: frontend
+    ports:
+      - "3001:3000"
+    environment:
+      - JAVA_BACKEND_URL=http://rag-backend:9999/api/search
+    depends_on:
+      - rag-backend
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
