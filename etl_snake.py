@@ -1,5 +1,4 @@
 import os
-import time
 import logging
 import pandas as pd
 import torch
@@ -7,7 +6,7 @@ import mysql.connector
 from elasticsearch import Elasticsearch, helpers
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
-from tqdm import tqdm  # Thanh hiển thị tiến độ
+from tqdm import tqdm
 
 # --- 1. CẤU HÌNH ---
 load_dotenv()
@@ -18,33 +17,58 @@ logging.basicConfig(
 )
 
 # Kết nối Elasticsearch
-es = Elasticsearch(os.getenv("ES_HOST"))
+es = Elasticsearch(
+    os.getenv("ES_HOST", "http://localhost:9200"),
+    verify_certs=False, 
+    ssl_show_warn=False
+)
 
 # Kết nối MySQL
 def get_mysql_connection():
     return mysql.connector.connect(
-        host=os.getenv("MYSQL_HOST"),
-        port=os.getenv("MYSQL_PORT"),
-        user=os.getenv("MYSQL_USER"),
-        password=os.getenv("MYSQL_PASSWORD"),
-        database=os.getenv("MYSQL_DB")
+        host=os.getenv("MYSQL_HOST", "localhost"),
+        port=os.getenv("MYSQL_PORT", "3306"),
+        user=os.getenv("MYSQL_USER", "root"),
+        password=os.getenv("MYSQL_PASSWORD", ""),
+        database=os.getenv("MYSQL_DB", "snake_db")
     )
 
-# Load Model AI (Chạy 1 lần)
-# Nếu có GPU thì dùng, không thì CPU
+# --- CẤU HÌNH AI MODEL (BAAI) ---
+# BAAI/bge-m3 hỗ trợ đa ngôn ngữ cực tốt, không cần dịch query
+MODEL_NAME = 'BAAI/bge-m3'
+EMBEDDING_DIMS = 1024  # Kích thước vector của BGE-M3 là 1024
+
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
-logging.info(f"Loading AI Model on: {device}...")
-model = SentenceTransformer('all-MiniLM-L6-v2', device=device)
-EMBEDDING_DIMS = 384  # Kích thước vector của model all-MiniLM-L6-v2
+logging.info(f"🔄 Đang tải Model AI: {MODEL_NAME} trên thiết bị: {device}...")
+try:
+    model = SentenceTransformer(MODEL_NAME, device=device)
+    logging.info("✅ Tải Model thành công!")
+except Exception as e:
+    logging.error(f"❌ Không tải được model. Lỗi: {e}")
+    exit(1)
 
 # --- 2. HÀM XỬ LÝ DỮ LIỆU ---
 
 def create_index_if_not_exists(index_name="snakes"):
-    """Tạo mapping cho Index trong Elasticsearch"""
+    """Tự động xóa và tạo lại Index nếu kích thước Vector thay đổi"""
     if es.indices.exists(index=index_name):
-        logging.info(f"Index '{index_name}' already exists. Skipping creation.")
-        return
+        # Kiểm tra xem index cũ có đúng kích thước 1024 không
+        try:
+            mapping = es.indices.get_mapping(index=index_name)
+            props = mapping[index_name]['mappings']['properties']
+            current_dims = props.get('vector_embedding', {}).get('dims', 0)
+            
+            if current_dims != EMBEDDING_DIMS:
+                logging.warning(f"⚠️ Index cũ ({current_dims} dims) không khớp model mới ({EMBEDDING_DIMS} dims).")
+                logging.warning("🗑️ Đang xóa Index cũ để tạo lại...")
+                es.indices.delete(index=index_name)
+            else:
+                logging.info(f"✅ Index '{index_name}' đã tồn tại và đúng cấu hình.")
+                return
+        except Exception as e:
+            logging.warning(f"⚠️ Không kiểm tra được mapping cũ, sẽ tạo lại. Lỗi: {e}")
 
+    # Tạo Mapping mới
     mapping = {
         "mappings": {
             "properties": {
@@ -53,64 +77,35 @@ def create_index_if_not_exists(index_name="snakes"):
                 "common_names": {"type": "text", "analyzer": "standard"},
                 "family": {"type": "keyword"},
                 "danger_level": {"type": "keyword"},
-                "full_text_context": {"type": "text"}, # Dùng để AI đọc trả lời
+                "max_len_cm": {"type": "float"}, # Đổi sang float để sort nếu cần
+                "full_text_context": {"type": "text"},
                 "vector_embedding": {
                     "type": "dense_vector",
-                    "dims": EMBEDDING_DIMS, # Phải khớp với model (384)
+                    "dims": EMBEDDING_DIMS,
                     "index": True,
-                    "similarity": "cosine"
+                    "similarity": "cosine" # Cosine tốt cho ngữ nghĩa
                 }
             }
         }
     }
     es.indices.create(index=index_name, body=mapping)
-    logging.info(f"Created index '{index_name}' with {EMBEDDING_DIMS} dimensions.")
+    logging.info(f"✅ Đã tạo Index '{index_name}' với kích thước Vector: {EMBEDDING_DIMS}")
 
 def fetch_snake_data():
-    """Lấy dữ liệu từ MySQL và Flatten thành bảng phẳng"""
+    """Lấy dữ liệu từ MySQL"""
     conn = get_mysql_connection()
     cursor = conn.cursor(dictionary=True)
     
-    logging.info("Fetching data from MySQL... This might take a moment.")
+    logging.info("📥 Đang lấy dữ liệu từ MySQL...")
     
-    # Câu Query "Thần thánh" để gom dữ liệu từ nhiều bảng
-    # Chúng ta join bảng tax__subspecies với tên, độ nguy hiểm, kích thước
     query = """
     SELECT 
-        -- Tạo ID duy nhất
         TRIM(CONCAT(t.genus, ' ', t.species, ' ', t.subspecies)) AS full_scientific_name,
-        t.genus,
-        t.species,
-        t.subspecies,
         tf.family,
-        
-        -- Gom tất cả tên thường gọi lại thành 1 chuỗi (ưu tiên tiếng Anh, Việt nếu có)
-        (
-            SELECT GROUP_CONCAT(DISTINCT cname SEPARATOR ', ') 
-            FROM map__cname m 
-            WHERE m.genus = t.genus AND m.species = t.species AND m.subspecies = t.subspecies
-        ) AS common_names,
-        
-        -- Lấy mức độ nguy hiểm
-        (
-            SELECT danger FROM map__danger d 
-            WHERE d.genus = t.genus AND d.species = t.species AND d.subspecies = t.subspecies 
-            LIMIT 1
-        ) AS danger_level,
-        
-        -- Lấy kích thước tối đa (Total Body Length)
-        (
-            SELECT MAX(tbl) FROM val__size s 
-            WHERE s.genus = t.genus AND s.species = t.species AND s.subspecies = t.subspecies
-        ) AS max_len_cm,
-        
-        -- Lấy kiểu sinh sản
-        (
-             SELECT reproduction FROM map__reproduction r 
-             WHERE r.genus = t.genus AND r.species = t.species AND r.subspecies = t.subspecies
-             LIMIT 1
-        ) AS reproduction
-        
+        (SELECT GROUP_CONCAT(DISTINCT cname SEPARATOR ', ') FROM map__cname m WHERE m.genus = t.genus AND m.species = t.species AND m.subspecies = t.subspecies) AS common_names,
+        (SELECT danger FROM map__danger d WHERE d.genus = t.genus AND d.species = t.species AND d.subspecies = t.subspecies LIMIT 1) AS danger_level,
+        (SELECT MAX(tbl) FROM val__size s WHERE s.genus = t.genus AND s.species = t.species AND s.subspecies = t.subspecies) AS max_len_cm,
+        (SELECT reproduction FROM map__reproduction r WHERE r.genus = t.genus AND r.species = t.species AND r.subspecies = t.subspecies LIMIT 1) AS reproduction
     FROM tax__subspecies t
     LEFT JOIN tax__genus tg ON t.genus = tg.genus
     LEFT JOIN tax__family tf ON tg.family = tf.family
@@ -118,108 +113,83 @@ def fetch_snake_data():
     
     try:
         cursor.execute(query)
-        rows = cursor.fetchall()
-        df = pd.DataFrame(rows)
-        logging.info(f"Fetched {len(df)} records from MySQL.")
+        df = pd.DataFrame(cursor.fetchall())
+        logging.info(f"📊 Đã lấy {len(df)} dòng dữ liệu.")
         return df
     except Exception as e:
-        logging.error(f"Error fetching data: {e}")
+        logging.error(f"❌ Lỗi SQL: {e}")
         return pd.DataFrame()
     finally:
         cursor.close()
         conn.close()
 
 def construct_context(row):
-    """Tạo đoạn văn mô tả để Embed"""
-    # Xử lý dữ liệu Null
-    cnames = row['common_names'] if row['common_names'] else "Unknown common name"
-    danger = row['danger_level'] if row['danger_level'] else "Unknown danger level"
-    family = row['family'] if row['family'] else "Unknown family"
-    maxlen = f"{row['max_len_cm']} cm" if row['max_len_cm'] else "unknown size"
-    repro = row['reproduction'] if row['reproduction'] else "unknown reproduction mode"
+    """Tạo đoạn văn mô tả đầy đủ để AI Embed"""
+    # Xử lý Null
+    cnames = row['common_names'] if row['common_names'] else "Unknown"
+    danger = row['danger_level'] if row['danger_level'] else "Unknown"
+    family = row['family'] if row['family'] else "Unknown"
     
-    # Tạo câu văn tự nhiên (Đây là input cho RAG)
+    # Text này sẽ được biến thành Vector. Càng chi tiết càng tốt.
+    # Model BAAI hiểu cả Anh lẫn Việt, nhưng dữ liệu gốc nên để tiếng Anh chuẩn khoa học.
     text = (
-        f"The snake {row['full_scientific_name']} is a member of the {family} family. "
-        f"It is commonly known as: {cnames}. "
+        f"Species: {row['full_scientific_name']}. "
+        f"Common names: {cnames}. "
+        f"Family: {family}. "
         f"Danger level: {danger}. "
-        f"Max length: {maxlen}. "
-        f"Reproduction: {repro}."
+        f"Max length: {row['max_len_cm']} cm. "
+        f"Reproduction: {row['reproduction']}."
     )
     return text
 
-# --- 3. HÀM CHÍNH ---
-
-def run_etl(batch_size=100):
-    # 1. Chuẩn bị Elasticsearch
+def run_etl(batch_size=64):
     create_index_if_not_exists("snakes")
-    
-    # 2. Lấy dữ liệu
     df = fetch_snake_data()
-    if df.empty:
-        logging.warning("No data found. Exiting.")
-        return
+    if df.empty: return
 
-    # 3. Tạo cột Text Context
-    logging.info("Constructing text contexts...")
+    logging.info("📝 Đang tạo ngữ cảnh (Context building)...")
     df['full_text_context'] = df.apply(construct_context, axis=1)
     
-    # 4. Xử lý theo Batch
-    total_records = len(df)
-    logging.info(f"Start processing {total_records} snakes...")
+    logging.info(f"🚀 Bắt đầu Embed và Index {len(df)} bản ghi...")
     
-    for i in tqdm(range(0, total_records, batch_size), desc="Indexing Batches"):
+    # Xử lý theo batch để tránh tràn RAM
+    for i in tqdm(range(0, len(df), batch_size), desc="Indexing"):
         batch = df.iloc[i : i + batch_size].copy()
         
-        # A. Tạo Embedding (Vector hóa)
-        # batch['full_text_context'].tolist() đưa list text vào model
         try:
+            # Encode bằng BAAI/bge-m3
             embeddings = model.encode(batch['full_text_context'].tolist(), show_progress_bar=False)
-            # Chuyển numpy array sang list để ES hiểu
             batch['vector_embedding'] = embeddings.tolist()
-        except Exception as e:
-            logging.error(f"Error embedding batch {i}: {e}")
-            continue
-
-        # B. Chuẩn bị dữ liệu đẩy vào ES
-        actions = []
-        records = batch.to_dict(orient="records")
-        
-        for rec in records:
-            # Tạo ID duy nhất bằng cách xóa khoảng trắng thừa
-            doc_id = rec['full_scientific_name'].replace(" ", "_")
             
-            action = {
-                "_index": "snakes",
-                "_id": doc_id,
-                "_source": {
-                    "id": doc_id,
-                    "scientific_name": rec['full_scientific_name'],
-                    "common_names": rec.get('common_names', ''),
-                    "family": rec.get('family', ''),
-                    "danger_level": rec.get('danger_level', ''),
-                    "max_len_cm": rec.get('max_len_cm'),
-                    "reproduction": rec.get('reproduction', ''),
-                    "full_text_context": rec['full_text_context'], # Text để hiển thị
-                    "vector_embedding": rec['vector_embedding']    # Vector để search
+            actions = []
+            for rec in batch.to_dict(orient="records"):
+                doc_id = rec['full_scientific_name'].replace(" ", "_")
+                action = {
+                    "_index": "snakes",
+                    "_id": doc_id,
+                    "_source": {
+                        "id": doc_id,
+                        "scientific_name": rec['full_scientific_name'],
+                        "common_names": rec.get('common_names', ''),
+                        "family": rec.get('family', ''),
+                        "danger_level": rec.get('danger_level', ''),
+                        "max_len_cm": rec.get('max_len_cm'),
+                        "full_text_context": rec['full_text_context'],
+                        "vector_embedding": rec['vector_embedding']
+                    }
                 }
-            }
-            actions.append(action)
+                actions.append(action)
             
-        # C. Đẩy vào Elasticsearch
-        if actions:
-            try:
-                success, failed = helpers.bulk(es, actions, stats_only=True)
-                # logging.info(f"Batch {i//batch_size + 1}: Indexed {success}, Failed {failed}")
-            except Exception as e:
-                logging.error(f"Error indexing batch: {e}")
+            if actions:
+                helpers.bulk(es, actions)
+                
+        except Exception as e:
+            logging.error(f"❌ Lỗi tại batch {i}: {e}")
 
-    logging.info("ETL Process Completed Successfully!")
+    logging.info("🎉 ETL Hoàn tất! Dữ liệu đã sẵn sàng.")
 
 if __name__ == "__main__":
-    # Kiểm tra kết nối ES trước
     if es.ping():
-        logging.info("Connected to Elasticsearch!")
-        run_etl(batch_size=50)
+        run_etl()
     else:
-        logging.error("Could not connect to Elasticsearch. Check .env or Docker.")
+        logging.error("❌ Không thể kết nối Elasticsearch.")

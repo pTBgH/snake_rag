@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  snake_fastapi:
+    build: .
+    container_name: snake_fastapi
+    ports:
+      - "5000:5000"
+    environment:
+      - ES_HOST=${ES_HOST}
+      - MYSQL_HOST=${MYSQL_HOST}
+      - MYSQL_PORT=${MYSQL_PORT}
+      - MYSQL_USER=${MYSQL_USER}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+      - MYSQL_DB=${MYSQL_DB}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+      - ./logs:/app/logs
+    networks:
+      - snake-network
+
+networks:
+  snake-network:
+    external: true
