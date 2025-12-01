@@ -1,0 +1,11 @@
+version: '3.8'
+
+services:
+  snake_api_mock:
+    build: .
+    container_name: snake_api_mock
+    ports:
+      - "5000:5000"
+    # Không cần env_file
+    # Không cần networks phức tạp
+    # Không cần volumes (để code cố định trong image luôn cho gọn)
