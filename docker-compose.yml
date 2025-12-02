@@ -1,19 +1,7 @@
 version: '3.8'
 
 services:
-
-  # --- 2. JAVA BACKEND (BE-QTDA) ---
-  sn-java:
-    build: ./BE-QTDA
-    container_name: sn-java
-    ports:
-      - "9999:9999"
-    environment:
-      - RAG_FASTAPI_URL=http://snake_fastapi:5000/api/ask-snake
-    networks:
-      - snake-network
-
-  # --- 3. FRONTEND (FE-QTDA) ---
+  # --- 1. FRONTEND (Next.js) ---
   sn-frontend:
     build: ./FE-QTDA
     container_name: sn-frontend
@@ -23,7 +11,38 @@ services:
       - JAVA_BACKEND_URL=http://sn-java:9999/api/search
     networks:
       - snake-network
+    depends_on:
+      - sn-java
+
+  # --- 2. JAVA BACKEND (Spring Boot) ---
+  sn-java:
+    build: ./BE-QTDA
+    container_name: sn-java
+    ports:
+      - "9999:9999"
+    environment:
+      - RAG_FASTAPI_URL=http://snake_fastapi:5000/api/ask-snake
+    volumes:
+      # QUAN TRỌNG: Map thư mục logs trong Docker ra máy thật
+      # File log sẽ xuất hiện tại: thư mục_dự_án/BE-QTDA/logs/
+      - ./BE-QTDA/logs:/app/logs
+    networks:
+      - snake-network
+    depends_on:
+      - snake_fastapi
+
+  # --- 3. PYTHON AI (FastAPI) ---
+  snake_fastapi:
+    build: ./fakefast
+    container_name: snake_fastapi
+    ports:
+      - "5001:5000"
+    volumes:
+      # Map logs của Python ra ngoài luôn (nếu cần)
+      - ./fakefast/logs:/app/logs
+    networks:
+      - snake-network
 
 networks:
   snake-network:
-    external: true
+    driver: bridge
